@@ -19,6 +19,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 from collections import defaultdict
+import math
 
 
 # # 1. Cifrados Clásicos
@@ -156,7 +157,6 @@ def solve_caesar_chi_squared(column: str) -> str:
             best_shift = shift
 
     return chr(best_shift + ord("A"))
-
 
 # ## Cifrado Monoalfabético
 
@@ -676,3 +676,162 @@ def crib_drag_visual(xor_data: bytes, crib: str):
         # Visualización tipo Matrix
         padding = " " * i
         print(f"Pos {i:02}: {padding} -> Revela: '{potential_text}'")
+
+
+# Qiskit imports
+from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister, transpile
+from qiskit.circuit.library import DraperQFTAdder, MCMTGate, ZGate
+from qiskit_aer import AerSimulator
+
+# ==========================================
+# 1. CLASE GROVER OPTIMIZADA
+# ==========================================
+class GroverUI:
+    def __init__(self, oracle, num_solutions=1, state_preparation=None, search_space_size=16, diffusion_registers=None):
+        self.oracle = oracle
+        self.num_qubits = oracle.num_qubits
+        self.num_solutions = num_solutions
+        self.simulator = AerSimulator()
+        self.diffusion_registers = diffusion_registers or [list(range(self.num_qubits))]
+        
+        if state_preparation is None:
+            qc = QuantumCircuit(self.num_qubits)
+            qc.h(range(self.num_qubits))
+            self.state_preparation = qc
+            self.search_space_size = 2**self.num_qubits
+        else:
+            self.state_preparation = state_preparation
+            self.search_space_size = search_space_size
+
+        theta = math.asin(math.sqrt(self.num_solutions / self.search_space_size))
+        self.optimal_iterations = math.floor(math.pi / (4 * theta))
+
+    def _build_diffuser(self) -> QuantumCircuit:
+        qc = QuantumCircuit(self.num_qubits, name="Diffuser")
+        qc.compose(self.state_preparation.inverse(), inplace=True)
+
+        for reg in self.diffusion_registers:
+            qc.x(reg)
+            num_controls = len(reg) - 1
+            if num_controls > 0:
+                qc.compose(MCMTGate(ZGate(), num_controls, 1), qubits=reg, inplace=True)
+            else:
+                qc.z(reg[0])
+            qc.x(reg)
+            
+        qc.compose(self.state_preparation, inplace=True)
+        qc.global_phase = math.pi * len(self.diffusion_registers)
+        return qc
+
+    def build_circuit(self) -> QuantumCircuit:
+        qr = QuantumRegister(self.num_qubits, name="q")
+        cr = ClassicalRegister(self.num_qubits, name="c")
+        qc = QuantumCircuit(qr, cr)
+
+        qc.compose(self.state_preparation, inplace=True)
+        diffuser = self._build_diffuser()
+        
+        for _ in range(self.optimal_iterations):
+            qc.compose(self.oracle, inplace=True)
+            qc.compose(diffuser, inplace=True)
+            qc.barrier()
+
+        qc.measure(qr, cr)
+        return qc
+
+    def search(self, shots=1024):
+        qc = self.build_circuit()
+        compiled_circuit = transpile(qc, self.simulator)
+        job = self.simulator.run(compiled_circuit, shots=shots)
+        return job.result().get_counts()
+
+
+
+# Preparación de estado y oráculo para Cifrado César
+def caesar_state_prep(P0_val, P1_val, num_bits=4):
+    K = QuantumRegister(num_bits, "k")
+    P0 = QuantumRegister(num_bits, "p0")
+    P1 = QuantumRegister(num_bits, "p1")
+    C = QuantumRegister(2, "cout")
+    qc = QuantumCircuit(K, P0, P1, C)
+    qc.h(K)
+    for i in range(num_bits):
+        if (P0_val >> i) & 1: qc.x(P0[i])
+        if (P1_val >> i) & 1: qc.x(P1[i])
+    return qc
+
+def caesar_oracle(C0_val, C1_val, num_bits=4):
+    K = QuantumRegister(num_bits, "k")
+    P0 = QuantumRegister(num_bits, "p0")
+    P1 = QuantumRegister(num_bits, "p1")
+    C = QuantumRegister(2, "cout")
+    qc = QuantumCircuit(K, P0, P1, C)
+
+    adder = DraperQFTAdder(num_bits, kind="half")
+    qc.append(adder, list(K) + list(P0) + [C[0]])
+    qc.append(adder, list(K) + list(P1) + [C[1]])
+
+    for i in range(num_bits):
+        if not ((C0_val >> i) & 1): qc.x(P0[i])
+        if not ((C1_val >> i) & 1): qc.x(P1[i])
+
+    p_qubits = list(P0) + list(P1)
+    qc.compose(MCMTGate(ZGate(), len(p_qubits) - 1, 1), qubits=p_qubits, inplace=True)
+
+    for i in range(num_bits):
+        if not ((C0_val >> i) & 1): qc.x(P0[i])
+        if not ((C1_val >> i) & 1): qc.x(P1[i])
+
+    qc.append(adder.inverse(), list(K) + list(P1) + [C[1]])
+    qc.append(adder.inverse(), list(K) + list(P0) + [C[0]])
+    return qc
+
+
+## Preparación de estado y oráculo para Vigenère
+def vigenere_state_prep(P_vals, num_bits=4):
+    n_blocks = len(P_vals) # Calculamos la longitud (n) dinámicamente
+    
+    K = [QuantumRegister(num_bits, f"k{i}") for i in range(n_blocks)]
+    P = [QuantumRegister(num_bits, f"p{i}") for i in range(n_blocks)]
+    C = QuantumRegister(n_blocks, "cout")
+    qc = QuantumCircuit(*K, *P, C)
+    
+    for i in range(n_blocks):
+        qc.h(K[i])
+        for bit in range(num_bits):
+            if (P_vals[i] >> bit) & 1: 
+                qc.x(P[i][bit])
+    return qc
+
+def vigenere_oracle(C_vals, num_bits=4):
+    n_blocks = len(C_vals) # Calculamos la longitud (n) dinámicamente
+    
+    K = [QuantumRegister(num_bits, f"k{i}") for i in range(n_blocks)]
+    P = [QuantumRegister(num_bits, f"p{i}") for i in range(n_blocks)]
+    C = QuantumRegister(n_blocks, "cout")
+    qc = QuantumCircuit(*K, *P, C)
+    
+    adder = DraperQFTAdder(num_bits, kind="half")
+
+    # 1. Sumas independientes
+    for i in range(n_blocks):
+        qc.append(adder, list(K[i]) + list(P[i]) + [C[i]])
+
+    # 2 y 3. Verificación e Inversión de Fase
+    for i in range(n_blocks):
+        for bit in range(num_bits):
+            if not ((C_vals[i] >> bit) & 1): 
+                qc.x(P[i][bit])
+                
+        # El MCMTGate necesita (num_bits - 1) controles
+        qc.compose(MCMTGate(ZGate(), num_bits - 1, 1), qubits=list(P[i]), inplace=True)
+        
+        for bit in range(num_bits):
+            if not ((C_vals[i] >> bit) & 1): 
+                qc.x(P[i][bit])
+
+    # 4. Deshacer el cómputo (Uncompute)
+    for i in range(n_blocks):
+        qc.append(adder.inverse(), list(K[i]) + list(P[i]) + [C[i]])
+        
+    return qc

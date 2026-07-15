@@ -25,12 +25,18 @@ pg_polialphabetic = st.Page(
 # Crea un archivo vacío en views/modernos.py
 pg_modern = st.Page("views/modernos.py", title="Ataques Modernos", icon="💣")
 
+# 5. Ataques Cuánticos (Grover)
+pg_quantum = st.Page(
+    "views/quantum-attacks.py", title="Ataques Cuánticos", icon="⚛️"
+)
+
 # Sistema de Navegación
 pg = st.navigation(
     {
         "Proyecto": [pg_intro],
         "Fase 1: Clásicos": [pg_monoalphabetic, pg_polialphabetic],
         "Fase 2: Modernos": [pg_modern],
+        "Fase 3: Computación Cuántica": [pg_quantum],
     }
 )
 
